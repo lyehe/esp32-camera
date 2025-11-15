@@ -26,6 +26,8 @@ if(IDF_TARGET STREQUAL "esp32" OR IDF_TARGET STREQUAL "esp32s2" OR IDF_TARGET ST
     driver/esp_camera.c
     driver/cam_hal.c
     driver/sensor.c
+    sensors/sensor_common.c
+    sensors/gc_sensor_common.c
     sensors/ov2640.c
     sensors/ov3660.c
     sensors/ov5640.c

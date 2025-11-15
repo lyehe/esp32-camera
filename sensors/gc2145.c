@@ -59,7 +59,7 @@ static void print_regs(uint8_t slv_addr)
     vTaskDelay(pdMS_TO_TICKS(100));
     ESP_LOGI(TAG, "REG list look ======================");
     for (size_t i = 0xf0; i <= 0xfe; i++) {
-        ESP_LOGI(TAG, "reg[0x%02x] = 0x%02x", i, sensor_sensor_read_reg(slv_addr, i));
+        ESP_LOGI(TAG, "reg[0x%02x] = 0x%02x", i, sensor_read_reg(slv_addr, i));
     }
     ESP_LOGI(TAG, "\npage 0 ===");
     sensor_write_reg(slv_addr, 0xfe, 0x00); // page 0
