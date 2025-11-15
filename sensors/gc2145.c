@@ -21,6 +21,8 @@
 #include "gc2145.h"
 #include "gc2145_regs.h"
 #include "gc2145_settings.h"
+#include "private_include/sensor_common.h"
+#include "private_include/gc_sensor_common.h"
 
 #if defined(ARDUINO_ARCH_ESP32) && defined(CONFIG_ARDUHAL_ESP_LOG)
 #include "esp32-hal-log.h"
@@ -32,75 +34,24 @@ static const char *TAG = "gc2145";
 #define H8(v) ((v)>>8)
 #define L8(v) ((v)&0xff)
 
-//#define REG_DEBUG_ON
+// GC2145 pixel format configuration
+static const gc_pixformat_config_t gc2145_pixformat_config = {
+    .output_format_reg = P0_OUTPUT_FORMAT,  // 0x84
+    .rgb565_value = 6,
+    .yuv422_value = 2,
+    .raw_value = 0x17,
+    .grayscale_value = 0,  // Not supported
+    .use_full_write = false,
+    .bits_offset = 0,
+    .bits_mask = 0x1f,
+};
 
-static int read_reg(uint8_t slv_addr, const uint16_t reg)
-{
-    int ret = SCCB_Read(slv_addr, reg);
-#ifdef REG_DEBUG_ON
-    if (ret < 0) {
-        ESP_LOGE(TAG, "READ REG 0x%04x FAILED: %d", reg, ret);
-    }
-#endif
-    return ret;
-}
-
-static int write_reg(uint8_t slv_addr, const uint16_t reg, uint8_t value)
-{
-    int ret = 0;
-#ifndef REG_DEBUG_ON
-    ret = SCCB_Write(slv_addr, reg, value);
-#else
-    int old_value = read_reg(slv_addr, reg);
-    if (old_value < 0) {
-        return old_value;
-    }
-    if ((uint8_t)old_value != value) {
-        ESP_LOGI(TAG, "NEW REG 0x%04x: 0x%02x to 0x%02x", reg, (uint8_t)old_value, value);
-        ret = SCCB_Write(slv_addr, reg, value);
-    } else {
-        ESP_LOGD(TAG, "OLD REG 0x%04x: 0x%02x", reg, (uint8_t)old_value);
-        ret = SCCB_Write(slv_addr, reg, value);//maybe not?
-    }
-    if (ret < 0) {
-        ESP_LOGE(TAG, "WRITE REG 0x%04x FAILED: %d", reg, ret);
-    }
-#endif
-    return ret;
-}
-
-static int check_reg_mask(uint8_t slv_addr, uint16_t reg, uint8_t mask)
-{
-    return (read_reg(slv_addr, reg) & mask) == mask;
-}
-
-static int set_reg_bits(uint8_t slv_addr, uint16_t reg, uint8_t offset, uint8_t mask, uint8_t value)
-{
-    int ret = 0;
-    uint8_t c_value, new_value;
-    ret = read_reg(slv_addr, reg);
-    if (ret < 0) {
-        return ret;
-    }
-    c_value = ret;
-    new_value = (c_value & ~(mask << offset)) | ((value & mask) << offset);
-    ret = write_reg(slv_addr, reg, new_value);
-    return ret;
-}
-
-static int write_regs(uint8_t slv_addr, const uint16_t (*regs)[2])
-{
-    int i = 0, ret = 0;
-    while (!ret && regs[i][0] != REGLIST_TAIL) {
-        if (regs[i][0] == REG_DLY) {
-            vTaskDelay(regs[i][1] / portTICK_PERIOD_MS);
-        } else {
-            ret = write_reg(slv_addr, regs[i][0], regs[i][1]);
-        }
-        i++;
-    }
-    return ret;
-}
+// GC2145 mirror/flip configuration
+static const gc_mirror_config_t gc2145_mirror_config = {
+    .mirror_flip_reg = P0_ANALOG_MODE1,  // 0x17
+    .hmirror_bit = 0,
+    .vflip_bit = 1,
+};
 
 static void print_regs(uint8_t slv_addr)
 {
@@ -108,20 +59,20 @@ static void print_regs(uint8_t slv_addr)
     vTaskDelay(pdMS_TO_TICKS(100));
     ESP_LOGI(TAG, "REG list look ======================");
     for (size_t i = 0xf0; i <= 0xfe; i++) {
-        ESP_LOGI(TAG, "reg[0x%02x] = 0x%02x", i, read_reg(slv_addr, i));
+        ESP_LOGI(TAG, "reg[0x%02x] = 0x%02x", i, sensor_sensor_read_reg(slv_addr, i));
     }
     ESP_LOGI(TAG, "\npage 0 ===");
-    write_reg(slv_addr, 0xfe, 0x00); // page 0
+    sensor_write_reg(slv_addr, 0xfe, 0x00); // page 0
     for (size_t i = 0x03; i <= 0x24; i++) {
-        ESP_LOGI(TAG, "p0 reg[0x%02x] = 0x%02x", i, read_reg(slv_addr, i));
+        ESP_LOGI(TAG, "p0 reg[0x%02x] = 0x%02x", i, sensor_read_reg(slv_addr, i));
     }
     for (size_t i = 0x80; i <= 0xa2; i++) {
-        ESP_LOGI(TAG, "p0 reg[0x%02x] = 0x%02x", i, read_reg(slv_addr, i));
+        ESP_LOGI(TAG, "p0 reg[0x%02x] = 0x%02x", i, sensor_read_reg(slv_addr, i));
     }
     ESP_LOGI(TAG, "\npage 3 ===");
-    write_reg(slv_addr, 0xfe, 0x03); // page 3
+    sensor_write_reg(slv_addr, 0xfe, 0x03); // page 3
     for (size_t i = 0x01; i <= 0x43; i++) {
-        ESP_LOGI(TAG, "p3 reg[0x%02x] = 0x%02x", i, read_reg(slv_addr, i));
+        ESP_LOGI(TAG, "p3 reg[0x%02x] = 0x%02x", i, sensor_read_reg(slv_addr, i));
     }
 #endif
 }
@@ -130,21 +81,21 @@ static int reset(sensor_t *sensor)
 {
     int ret = 0;
     // Software Reset: clear all registers and reset them to their default values
-    ret = write_reg(sensor->slv_addr, RESET_RELATED, 0xe0);
+    ret = sensor_write_reg(sensor->slv_addr, RESET_RELATED, 0xe0);
     if (ret) {
         ESP_LOGE(TAG, "Software Reset FAILED!");
         return ret;
     }
     vTaskDelay(100 / portTICK_PERIOD_MS);
-    ret = write_regs(sensor->slv_addr, gc2145_default_init_regs);
+    ret = sensor_write_regs_16bit(sensor->slv_addr, gc2145_default_init_regs);
     if (ret == 0) {
         ESP_LOGD(TAG, "Camera defaults loaded");
         vTaskDelay(100 / portTICK_PERIOD_MS);
 #ifdef CONFIG_IDF_TARGET_ESP32
-        write_reg(sensor->slv_addr, 0xfe, 0x00);
+        sensor_write_reg(sensor->slv_addr, 0xfe, 0x00);
         //ensure pclk <= 15MHz for esp32
-        set_reg_bits(sensor->slv_addr, 0xf8, 0, 0x3f, 2); // divx4
-        set_reg_bits(sensor->slv_addr, 0xfa, 4, 0x0f, 2); // divide_by
+        sensor_set_reg_bits(sensor->slv_addr, 0xf8, 0, 0x3f, 2); // divx4
+        sensor_set_reg_bits(sensor->slv_addr, 0xfa, 4, 0x0f, 2); // divide_by
 #endif
 
     }
@@ -153,35 +104,7 @@ static int reset(sensor_t *sensor)
 
 static int set_pixformat(sensor_t *sensor, pixformat_t pixformat)
 {
-    int ret = 0;
-
-    switch (pixformat) {
-    case PIXFORMAT_RGB565:
-        write_reg(sensor->slv_addr, 0xfe, 0x00);
-        ret = set_reg_bits(sensor->slv_addr, P0_OUTPUT_FORMAT, 0, 0x1f, 6);  //RGB565
-        break;
-
-    case PIXFORMAT_YUV422:
-        write_reg(sensor->slv_addr, 0xfe, 0x00);
-        ret = set_reg_bits(sensor->slv_addr, P0_OUTPUT_FORMAT, 0, 0x1f, 2); //yuv422
-        break;
-
-    case PIXFORMAT_RAW:
-        write_reg(sensor->slv_addr, 0xfe, 0x00);
-        ret = set_reg_bits(sensor->slv_addr, P0_OUTPUT_FORMAT, 0, 0x1f, 0x17); //RAW Bayer
-        break;
-
-    default:
-        ESP_LOGW(TAG, "unsupport format");
-        ret = -1;
-        break;
-    }
-
-    if (ret == 0) {
-        sensor->pixformat = pixformat;
-        ESP_LOGD(TAG, "Set pixformat to: %u", pixformat);
-    }
-    return ret;
+    return gc_set_pixformat(sensor, pixformat, &gc2145_pixformat_config);
 }
 
 static int set_framesize(sensor_t *sensor, framesize_t framesize)
@@ -246,55 +169,55 @@ static int set_framesize(sensor_t *sensor, framesize_t framesize)
         }
     }
 
-    write_reg(sensor->slv_addr, 0xfe, 0x00);
-    write_reg(sensor->slv_addr, P0_CROP_ENABLE, 0x01);
-    write_reg(sensor->slv_addr, 0x09, H8(row_s));
-    write_reg(sensor->slv_addr, 0x0a, L8(row_s));
-    write_reg(sensor->slv_addr, 0x0b, H8(col_s));
-    write_reg(sensor->slv_addr, 0x0c, L8(col_s));
-    write_reg(sensor->slv_addr, 0x0d, H8(win_h + 8));
-    write_reg(sensor->slv_addr, 0x0e, L8(win_h + 8));
-    write_reg(sensor->slv_addr, 0x0f, H8(win_w + 16));
-    write_reg(sensor->slv_addr, 0x10, L8(win_w + 16));
+    sensor_write_reg(sensor->slv_addr, 0xfe, 0x00);
+    sensor_write_reg(sensor->slv_addr, P0_CROP_ENABLE, 0x01);
+    sensor_write_reg(sensor->slv_addr, 0x09, H8(row_s));
+    sensor_write_reg(sensor->slv_addr, 0x0a, L8(row_s));
+    sensor_write_reg(sensor->slv_addr, 0x0b, H8(col_s));
+    sensor_write_reg(sensor->slv_addr, 0x0c, L8(col_s));
+    sensor_write_reg(sensor->slv_addr, 0x0d, H8(win_h + 8));
+    sensor_write_reg(sensor->slv_addr, 0x0e, L8(win_h + 8));
+    sensor_write_reg(sensor->slv_addr, 0x0f, H8(win_w + 16));
+    sensor_write_reg(sensor->slv_addr, 0x10, L8(win_w + 16));
 
-    write_reg(sensor->slv_addr, 0x99, cfg->reg0x99);
-    write_reg(sensor->slv_addr, 0x9b, cfg->reg0x9b);
-    write_reg(sensor->slv_addr, 0x9c, cfg->reg0x9c);
-    write_reg(sensor->slv_addr, 0x9d, cfg->reg0x9d);
-    write_reg(sensor->slv_addr, 0x9e, cfg->reg0x9e);
-    write_reg(sensor->slv_addr, 0x9f, cfg->reg0x9f);
-    write_reg(sensor->slv_addr, 0xa0, cfg->reg0xa0);
-    write_reg(sensor->slv_addr, 0xa1, cfg->reg0xa1);
-    write_reg(sensor->slv_addr, 0xa2, cfg->reg0xa2);
+    sensor_write_reg(sensor->slv_addr, 0x99, cfg->reg0x99);
+    sensor_write_reg(sensor->slv_addr, 0x9b, cfg->reg0x9b);
+    sensor_write_reg(sensor->slv_addr, 0x9c, cfg->reg0x9c);
+    sensor_write_reg(sensor->slv_addr, 0x9d, cfg->reg0x9d);
+    sensor_write_reg(sensor->slv_addr, 0x9e, cfg->reg0x9e);
+    sensor_write_reg(sensor->slv_addr, 0x9f, cfg->reg0x9f);
+    sensor_write_reg(sensor->slv_addr, 0xa0, cfg->reg0xa0);
+    sensor_write_reg(sensor->slv_addr, 0xa1, cfg->reg0xa1);
+    sensor_write_reg(sensor->slv_addr, 0xa2, cfg->reg0xa2);
 
-    write_reg(sensor->slv_addr, 0x95, H8(h));
-    write_reg(sensor->slv_addr, 0x96, L8(h));
-    write_reg(sensor->slv_addr, 0x97, H8(w));
-    write_reg(sensor->slv_addr, 0x98, L8(w));
+    sensor_write_reg(sensor->slv_addr, 0x95, H8(h));
+    sensor_write_reg(sensor->slv_addr, 0x96, L8(h));
+    sensor_write_reg(sensor->slv_addr, 0x97, H8(w));
+    sensor_write_reg(sensor->slv_addr, 0x98, L8(w));
 
 
 #elif CONFIG_GC_SENSOR_WINDOWING_MODE
-    write_reg(sensor->slv_addr, 0xfe, 0x00);
+    sensor_write_reg(sensor->slv_addr, 0xfe, 0x00);
 
-    write_reg(sensor->slv_addr, P0_CROP_ENABLE, 0x01);
-    // write_reg(sensor->slv_addr, 0xec, col_s / 8); //measure window
-    // write_reg(sensor->slv_addr, 0xed, row_s / 8);
-    // write_reg(sensor->slv_addr, 0xee, (col_s + h) / 8);
-    // write_reg(sensor->slv_addr, 0xef, (row_s + w) / 8);
+    sensor_write_reg(sensor->slv_addr, P0_CROP_ENABLE, 0x01);
+    // sensor_write_reg(sensor->slv_addr, 0xec, col_s / 8); //measure window
+    // sensor_write_reg(sensor->slv_addr, 0xed, row_s / 8);
+    // sensor_write_reg(sensor->slv_addr, 0xee, (col_s + h) / 8);
+    // sensor_write_reg(sensor->slv_addr, 0xef, (row_s + w) / 8);
 
-    write_reg(sensor->slv_addr, 0x09, H8(row_s));
-    write_reg(sensor->slv_addr, 0x0a, L8(row_s));
-    write_reg(sensor->slv_addr, 0x0b, H8(col_s));
-    write_reg(sensor->slv_addr, 0x0c, L8(col_s));
-    write_reg(sensor->slv_addr, 0x0d, H8(h + 8));
-    write_reg(sensor->slv_addr, 0x0e, L8(h + 8));
-    write_reg(sensor->slv_addr, 0x0f, H8(w + 8));
-    write_reg(sensor->slv_addr, 0x10, L8(w + 8));
+    sensor_write_reg(sensor->slv_addr, 0x09, H8(row_s));
+    sensor_write_reg(sensor->slv_addr, 0x0a, L8(row_s));
+    sensor_write_reg(sensor->slv_addr, 0x0b, H8(col_s));
+    sensor_write_reg(sensor->slv_addr, 0x0c, L8(col_s));
+    sensor_write_reg(sensor->slv_addr, 0x0d, H8(h + 8));
+    sensor_write_reg(sensor->slv_addr, 0x0e, L8(h + 8));
+    sensor_write_reg(sensor->slv_addr, 0x0f, H8(w + 8));
+    sensor_write_reg(sensor->slv_addr, 0x10, L8(w + 8));
 
-    write_reg(sensor->slv_addr, 0x95, H8(h));
-    write_reg(sensor->slv_addr, 0x96, L8(h));
-    write_reg(sensor->slv_addr, 0x97, H8(w));
-    write_reg(sensor->slv_addr, 0x98, L8(w));
+    sensor_write_reg(sensor->slv_addr, 0x95, H8(h));
+    sensor_write_reg(sensor->slv_addr, 0x96, L8(h));
+    sensor_write_reg(sensor->slv_addr, 0x97, H8(w));
+    sensor_write_reg(sensor->slv_addr, 0x98, L8(w));
 
 #endif
 
@@ -307,33 +230,19 @@ static int set_framesize(sensor_t *sensor, framesize_t framesize)
 
 static int set_hmirror(sensor_t *sensor, int enable)
 {
-    int ret = 0;
-    sensor->status.hmirror = enable;
-    ret = write_reg(sensor->slv_addr, 0xfe, 0x00);
-    ret |= set_reg_bits(sensor->slv_addr, P0_ANALOG_MODE1, 0, 0x01, enable != 0);
-    if (ret == 0) {
-        ESP_LOGD(TAG, "Set h-mirror to: %d", enable);
-    }
-    return ret;
+    return gc_set_hmirror(sensor, enable, &gc2145_mirror_config);
 }
 
 static int set_vflip(sensor_t *sensor, int enable)
 {
-    int ret = 0;
-    sensor->status.vflip = enable;
-    ret = write_reg(sensor->slv_addr, 0xfe, 0x00);
-    ret |= set_reg_bits(sensor->slv_addr, P0_ANALOG_MODE1, 1, 0x01, enable != 0);
-    if (ret == 0) {
-        ESP_LOGD(TAG, "Set v-flip to: %d", enable);
-    }
-    return ret;
+    return gc_set_vflip(sensor, enable, &gc2145_mirror_config);
 }
 
 static int set_colorbar(sensor_t *sensor, int enable)
 {
     int ret = 0;
-    // ret = write_reg(sensor->slv_addr, 0xfe, 0x00);
-    // ret |= set_reg_bits(sensor->slv_addr, P0_DEBUG_MODE3, 3, 0x01, enable);
+    // ret = sensor_write_reg(sensor->slv_addr, 0xfe, 0x00);
+    // ret |= sensor_set_reg_bits(sensor->slv_addr, P0_DEBUG_MODE3, 3, 0x01, enable);
     if (ret == 0) {
         sensor->status.colorbar = enable;
         ESP_LOGD(TAG, "Set colorbar to: %d", enable);
@@ -347,7 +256,7 @@ static int get_reg(sensor_t *sensor, int reg, int mask)
     if (mask > 0xFF) {
         ESP_LOGE(TAG, "mask should not more than 0xff");
     } else {
-        ret = read_reg(sensor->slv_addr, reg);
+        ret = sensor_read_reg(sensor->slv_addr, reg);
     }
     if (ret > 0) {
         ret &= mask;
@@ -361,7 +270,7 @@ static int set_reg(sensor_t *sensor, int reg, int mask, int value)
     if (mask > 0xFF) {
         ESP_LOGE(TAG, "mask should not more than 0xff");
     } else {
-        ret = read_reg(sensor->slv_addr, reg);
+        ret = sensor_read_reg(sensor->slv_addr, reg);
     }
     if (ret < 0) {
         return ret;
@@ -371,14 +280,14 @@ static int set_reg(sensor_t *sensor, int reg, int mask, int value)
     if (mask > 0xFF) {
 
     } else {
-        ret = write_reg(sensor->slv_addr, reg, value);
+        ret = sensor_write_reg(sensor->slv_addr, reg, value);
     }
     return ret;
 }
 
 static int init_status(sensor_t *sensor)
 {
-    write_reg(sensor->slv_addr, 0xfe, 0x00);
+    sensor_write_reg(sensor->slv_addr, 0xfe, 0x00);
     sensor->status.brightness = 0;
     sensor->status.contrast = 0;
     sensor->status.saturation = 0;
@@ -390,8 +299,8 @@ static int init_status(sensor_t *sensor)
     sensor->status.dcw = 0;
     sensor->status.agc = 0;
     sensor->status.aec = 0;
-    sensor->status.hmirror = check_reg_mask(sensor->slv_addr, P0_ANALOG_MODE1, 0x01);
-    sensor->status.vflip = check_reg_mask(sensor->slv_addr, P0_ANALOG_MODE1, 0x02);
+    sensor->status.hmirror = sensor_check_reg_mask(sensor->slv_addr, P0_ANALOG_MODE1, 0x01);
+    sensor->status.vflip = sensor_check_reg_mask(sensor->slv_addr, P0_ANALOG_MODE1, 0x02);
     sensor->status.colorbar = 0;
     sensor->status.bpc = 0;
     sensor->status.wpc = 0;
@@ -407,17 +316,6 @@ static int init_status(sensor_t *sensor)
 
     print_regs(sensor->slv_addr);
     return 0;
-}
-
-static int set_dummy(sensor_t *sensor, int val)
-{
-    ESP_LOGW(TAG, "Unsupported");
-    return -1;
-}
-static int set_gainceiling_dummy(sensor_t *sensor, gainceiling_t val)
-{
-    ESP_LOGW(TAG, "Unsupported");
-    return -1;
 }
 
 int esp32_camera_gc2145_detect(int slv_addr, sensor_id_t *id)
@@ -442,35 +340,35 @@ int esp32_camera_gc2145_init(sensor_t *sensor)
     sensor->reset = reset;
     sensor->set_pixformat = set_pixformat;
     sensor->set_framesize = set_framesize;
-    sensor->set_contrast = set_dummy;
-    sensor->set_brightness = set_dummy;
-    sensor->set_saturation = set_dummy;
-    sensor->set_sharpness = set_dummy;
-    sensor->set_denoise = set_dummy;
-    sensor->set_gainceiling = set_gainceiling_dummy;
-    sensor->set_quality = set_dummy;
+    sensor->set_contrast = sensor_unsupported_int;
+    sensor->set_brightness = sensor_unsupported_int;
+    sensor->set_saturation = sensor_unsupported_int;
+    sensor->set_sharpness = sensor_unsupported_int;
+    sensor->set_denoise = sensor_unsupported_int;
+    sensor->set_gainceiling = sensor_unsupported_gainceiling;
+    sensor->set_quality = sensor_unsupported_int;
     sensor->set_colorbar = set_colorbar;
-    sensor->set_whitebal = set_dummy;
-    sensor->set_gain_ctrl = set_dummy;
-    sensor->set_exposure_ctrl = set_dummy;
+    sensor->set_whitebal = sensor_unsupported_int;
+    sensor->set_gain_ctrl = sensor_unsupported_int;
+    sensor->set_exposure_ctrl = sensor_unsupported_int;
     sensor->set_hmirror = set_hmirror;
     sensor->set_vflip = set_vflip;
 
-    sensor->set_aec2 = set_dummy;
-    sensor->set_awb_gain = set_dummy;
-    sensor->set_agc_gain = set_dummy;
-    sensor->set_aec_value = set_dummy;
+    sensor->set_aec2 = sensor_unsupported_int;
+    sensor->set_awb_gain = sensor_unsupported_int;
+    sensor->set_agc_gain = sensor_unsupported_int;
+    sensor->set_aec_value = sensor_unsupported_int;
 
-    sensor->set_special_effect = set_dummy;
-    sensor->set_wb_mode = set_dummy;
-    sensor->set_ae_level = set_dummy;
+    sensor->set_special_effect = sensor_unsupported_int;
+    sensor->set_wb_mode = sensor_unsupported_int;
+    sensor->set_ae_level = sensor_unsupported_int;
 
-    sensor->set_dcw = set_dummy;
-    sensor->set_bpc = set_dummy;
-    sensor->set_wpc = set_dummy;
+    sensor->set_dcw = sensor_unsupported_int;
+    sensor->set_bpc = sensor_unsupported_int;
+    sensor->set_wpc = sensor_unsupported_int;
 
-    sensor->set_raw_gma = set_dummy;
-    sensor->set_lenc = set_dummy;
+    sensor->set_raw_gma = sensor_unsupported_int;
+    sensor->set_lenc = sensor_unsupported_int;
 
     sensor->get_reg = get_reg;
     sensor->set_reg = set_reg;
