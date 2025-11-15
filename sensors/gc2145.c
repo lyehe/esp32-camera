@@ -165,6 +165,12 @@ static int set_pixformat(sensor_t *sensor, pixformat_t pixformat)
         write_reg(sensor->slv_addr, 0xfe, 0x00);
         ret = set_reg_bits(sensor->slv_addr, P0_OUTPUT_FORMAT, 0, 0x1f, 2); //yuv422
         break;
+
+    case PIXFORMAT_RAW:
+        write_reg(sensor->slv_addr, 0xfe, 0x00);
+        ret = set_reg_bits(sensor->slv_addr, P0_OUTPUT_FORMAT, 0, 0x1f, 0x17); //RAW Bayer
+        break;
+
     default:
         ESP_LOGW(TAG, "unsupport format");
         ret = -1;

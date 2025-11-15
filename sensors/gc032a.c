@@ -165,6 +165,12 @@ static int set_pixformat(sensor_t *sensor, pixformat_t pixformat)
         write_reg(sensor->slv_addr, 0xfe, 0x00);
         ret = set_reg_bits(sensor->slv_addr, 0x44, 0, 0x1f, 3);
         break;
+
+    case PIXFORMAT_RAW:
+        write_reg(sensor->slv_addr, 0xfe, 0x00);
+        ret = set_reg_bits(sensor->slv_addr, 0x44, 0, 0x1f, 0);  //RAW Bayer (typical GC pattern)
+        break;
+
     default:
         ESP_LOGW(TAG, "unsupport format");
         ret = -1;
