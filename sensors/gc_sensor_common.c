@@ -36,12 +36,6 @@ int gc_set_pixformat(sensor_t *sensor, pixformat_t pixformat, const gc_pixformat
     uint8_t format_value = 0;
     bool format_supported = true;
 
-    // Select page 0
-    ret = sensor_write_reg(sensor->slv_addr, GC_PAGE_SELECT_REG, GC_PAGE_0);
-    if (ret < 0) {
-        return ret;
-    }
-
     // Determine format value based on pixel format
     switch (pixformat) {
     case PIXFORMAT_RGB565:
@@ -74,6 +68,9 @@ int gc_set_pixformat(sensor_t *sensor, pixformat_t pixformat, const gc_pixformat
         return -1;
     }
 
+    // Select page 0 (matches original - doesn't check return)
+    sensor_write_reg(sensor->slv_addr, GC_PAGE_SELECT_REG, GC_PAGE_0);
+
     // Write format value to register
     if (config->use_full_write) {
         ret = sensor_write_reg(sensor->slv_addr, config->output_format_reg, format_value);
@@ -94,18 +91,17 @@ int gc_set_hmirror(sensor_t *sensor, int enable, const gc_mirror_config_t *confi
 {
     int ret = 0;
 
+    // Update status first (matches original GC sensor behavior)
+    sensor->status.hmirror = enable;
+
     // Select page 0
     ret = sensor_write_reg(sensor->slv_addr, GC_PAGE_SELECT_REG, GC_PAGE_0);
-    if (ret < 0) {
-        return ret;
-    }
 
-    // Set horizontal mirror bit
-    ret = sensor_set_reg_bits(sensor->slv_addr, config->mirror_flip_reg,
-                              config->hmirror_bit, 0x01, enable != 0);
+    // Set horizontal mirror bit (use |= to match original error handling)
+    ret |= sensor_set_reg_bits(sensor->slv_addr, config->mirror_flip_reg,
+                               config->hmirror_bit, 0x01, enable != 0);
 
     if (ret == 0) {
-        sensor->status.hmirror = enable;
         ESP_LOGD(TAG, "Set h-mirror to: %d", enable);
     }
 
@@ -116,18 +112,17 @@ int gc_set_vflip(sensor_t *sensor, int enable, const gc_mirror_config_t *config)
 {
     int ret = 0;
 
+    // Update status first (matches original GC sensor behavior)
+    sensor->status.vflip = enable;
+
     // Select page 0
     ret = sensor_write_reg(sensor->slv_addr, GC_PAGE_SELECT_REG, GC_PAGE_0);
-    if (ret < 0) {
-        return ret;
-    }
 
-    // Set vertical flip bit
-    ret = sensor_set_reg_bits(sensor->slv_addr, config->mirror_flip_reg,
-                              config->vflip_bit, 0x01, enable != 0);
+    // Set vertical flip bit (use |= to match original error handling)
+    ret |= sensor_set_reg_bits(sensor->slv_addr, config->mirror_flip_reg,
+                               config->vflip_bit, 0x01, enable != 0);
 
     if (ret == 0) {
-        sensor->status.vflip = enable;
         ESP_LOGD(TAG, "Set v-flip to: %d", enable);
     }
 
