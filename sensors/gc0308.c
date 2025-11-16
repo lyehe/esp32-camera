@@ -21,6 +21,8 @@
 #include "gc0308.h"
 #include "gc0308_regs.h"
 #include "gc0308_settings.h"
+#include "private_include/sensor_common.h"
+#include "private_include/gc_sensor_common.h"
 
 #if defined(ARDUINO_ARCH_ESP32) && defined(CONFIG_ARDUHAL_ESP_LOG)
 #include "esp32-hal-log.h"
@@ -32,62 +34,36 @@ static const char *TAG = "gc0308";
 #define H8(v) ((v)>>8)
 #define L8(v) ((v)&0xff)
 
-//#define REG_DEBUG_ON
+// GC0308 mirror/flip configuration
+static const gc_mirror_config_t gc0308_mirror_config = {
+    .mirror_flip_reg = 0x14,
+    .hmirror_bit = 0,
+    .vflip_bit = 1,
+};
 
-static int read_reg(uint8_t slv_addr, const uint16_t reg)
+// Debug print helper (sensor-specific, uses sensor_common functions)
+static void print_regs(uint8_t slv_addr)
 {
-    int ret = SCCB_Read(slv_addr, reg);
-#ifdef REG_DEBUG_ON
-    if (ret < 0) {
-        ESP_LOGE(TAG, "READ REG 0x%04x FAILED: %d", reg, ret);
+#ifdef DEBUG_PRINT_REG
+    ESP_LOGI(TAG, "REG list look ======================");
+    for (size_t i = 0xf0; i <= 0xfe; i++) {
+        ESP_LOGI(TAG, "reg[0x%02x] = 0x%02x", i, sensor_read_reg(slv_addr, i));
+    }
+    ESP_LOGI(TAG, "\npage 0 ===");
+    sensor_write_reg(slv_addr, 0xfe, 0x00); // page 0
+    for (size_t i = 0x03; i <= 0xa2; i++) {
+        ESP_LOGI(TAG, "p0 reg[0x%02x] = 0x%02x", i, sensor_read_reg(slv_addr, i));
+    }
+
+    ESP_LOGI(TAG, "\npage 3 ===");
+    sensor_write_reg(slv_addr, 0xfe, 0x03); // page 3
+    for (size_t i = 0x01; i <= 0x43; i++) {
+        ESP_LOGI(TAG, "p3 reg[0x%02x] = 0x%02x", i, sensor_read_reg(slv_addr, i));
     }
 #endif
-    return ret;
 }
 
-static int write_reg(uint8_t slv_addr, const uint16_t reg, uint8_t value)
-{
-    int ret = 0;
-#ifndef REG_DEBUG_ON
-    ret = SCCB_Write(slv_addr, reg, value);
-#else
-    int old_value = read_reg(slv_addr, reg);
-    if (old_value < 0) {
-        return old_value;
-    }
-    if ((uint8_t)old_value != value) {
-        ESP_LOGI(TAG, "NEW REG 0x%04x: 0x%02x to 0x%02x", reg, (uint8_t)old_value, value);
-        ret = SCCB_Write(slv_addr, reg, value);
-    } else {
-        ESP_LOGD(TAG, "OLD REG 0x%04x: 0x%02x", reg, (uint8_t)old_value);
-        ret = SCCB_Write(slv_addr, reg, value);//maybe not?
-    }
-    if (ret < 0) {
-        ESP_LOGE(TAG, "WRITE REG 0x%04x FAILED: %d", reg, ret);
-    }
-#endif
-    return ret;
-}
-
-static int check_reg_mask(uint8_t slv_addr, uint16_t reg, uint8_t mask)
-{
-    return (read_reg(slv_addr, reg) & mask) == mask;
-}
-
-static int set_reg_bits(uint8_t slv_addr, uint16_t reg, uint8_t offset, uint8_t mask, uint8_t value)
-{
-    int ret = 0;
-    uint8_t c_value, new_value;
-    ret = read_reg(slv_addr, reg);
-    if (ret < 0) {
-        return ret;
-    }
-    c_value = ret;
-    new_value = (c_value & ~(mask << offset)) | ((value & mask) << offset);
-    ret = write_reg(slv_addr, reg, new_value);
-    return ret;
-}
-
+// Register array write helper with delay support (sensor-specific)
 static int write_regs(uint8_t slv_addr, const uint8_t (*regs)[2], size_t regs_size)
 {
     int i = 0, ret = 0;
@@ -95,39 +71,18 @@ static int write_regs(uint8_t slv_addr, const uint8_t (*regs)[2], size_t regs_si
         if (regs[i][0] == REG_DLY) {
             vTaskDelay(regs[i][1] / portTICK_PERIOD_MS);
         } else {
-            ret = write_reg(slv_addr, regs[i][0], regs[i][1]);
+            ret = sensor_write_reg(slv_addr, regs[i][0], regs[i][1]);
         }
         i++;
     }
     return ret;
 }
 
-static void print_regs(uint8_t slv_addr)
-{
-#ifdef DEBUG_PRINT_REG
-    ESP_LOGI(TAG, "REG list look ======================");
-    for (size_t i = 0xf0; i <= 0xfe; i++) {
-        ESP_LOGI(TAG, "reg[0x%02x] = 0x%02x", i, read_reg(slv_addr, i));
-    }
-    ESP_LOGI(TAG, "\npage 0 ===");
-    write_reg(slv_addr, 0xfe, 0x00); // page 0
-    for (size_t i = 0x03; i <= 0xa2; i++) {
-        ESP_LOGI(TAG, "p0 reg[0x%02x] = 0x%02x", i, read_reg(slv_addr, i));
-    }
-
-    ESP_LOGI(TAG, "\npage 3 ===");
-    write_reg(slv_addr, 0xfe, 0x03); // page 3
-    for (size_t i = 0x01; i <= 0x43; i++) {
-        ESP_LOGI(TAG, "p3 reg[0x%02x] = 0x%02x", i, read_reg(slv_addr, i));
-    }
-#endif
-}
-
 static int reset(sensor_t *sensor)
 {
     int ret = 0;
     // Software Reset: clear all registers and reset them to their default values
-    ret = write_reg(sensor->slv_addr, RESET_RELATED, 0xf0);
+    ret = sensor_write_reg(sensor->slv_addr, RESET_RELATED, 0xf0);
     if (ret) {
         ESP_LOGE(TAG, "Software Reset FAILED!");
         return ret;
@@ -138,9 +93,9 @@ static int reset(sensor_t *sensor)
     if (ret == 0) {
         ESP_LOGD(TAG, "Camera defaults loaded");
         vTaskDelay(80 / portTICK_PERIOD_MS);
-        write_reg(sensor->slv_addr, 0xfe, 0x00);
+        sensor_write_reg(sensor->slv_addr, 0xfe, 0x00);
 #ifdef CONFIG_IDF_TARGET_ESP32
-        set_reg_bits(sensor->slv_addr, 0x28, 4, 0x07, 1);  //frequency division for esp32, ensure pclk <= 15MHz
+        sensor_set_reg_bits(sensor->slv_addr, 0x28, 4, 0x07, 1);  //frequency division for esp32, ensure pclk <= 15MHz
 #endif
     }
     return ret;
@@ -152,23 +107,23 @@ static int set_pixformat(sensor_t *sensor, pixformat_t pixformat)
 
     switch (pixformat) {
     case PIXFORMAT_RGB565:
-        write_reg(sensor->slv_addr, 0xfe, 0x00);
-        ret = set_reg_bits(sensor->slv_addr, 0x24, 0, 0x0f, 6);  //RGB565
+        sensor_write_reg(sensor->slv_addr, 0xfe, 0x00);
+        ret = sensor_set_reg_bits(sensor->slv_addr, 0x24, 0, 0x0f, 6);  //RGB565
         break;
 
     case PIXFORMAT_YUV422:
-        write_reg(sensor->slv_addr, 0xfe, 0x00);
-        ret = set_reg_bits(sensor->slv_addr, 0x24, 0, 0x0f, 2); //yuv422 Y Cb Y Cr
+        sensor_write_reg(sensor->slv_addr, 0xfe, 0x00);
+        ret = sensor_set_reg_bits(sensor->slv_addr, 0x24, 0, 0x0f, 2); //yuv422 Y Cb Y Cr
         break;
 
     case PIXFORMAT_GRAYSCALE:
-        write_reg(sensor->slv_addr, 0xfe, 0x00);
-        ret = write_reg(sensor->slv_addr, 0x24, 0xb1);
+        sensor_write_reg(sensor->slv_addr, 0xfe, 0x00);
+        ret = sensor_write_reg(sensor->slv_addr, 0x24, 0xb1);
         break;
 
     case PIXFORMAT_RAW:
-        write_reg(sensor->slv_addr, 0xfe, 0x00);
-        ret = write_reg(sensor->slv_addr, 0x24, 0xb7); //RAW Bayer (from Allwinner driver)
+        sensor_write_reg(sensor->slv_addr, 0xfe, 0x00);
+        ret = sensor_write_reg(sensor->slv_addr, 0x24, 0xb7); //RAW Bayer (from Allwinner driver)
         break;
 
     default:
@@ -237,45 +192,45 @@ static int set_framesize(sensor_t *sensor, framesize_t framesize)
         }
     }
 
-    write_reg(sensor->slv_addr, 0xfe, 0x00);
+    sensor_write_reg(sensor->slv_addr, 0xfe, 0x00);
 
-    write_reg(sensor->slv_addr, 0x05, H8(row_s));
-    write_reg(sensor->slv_addr, 0x06, L8(row_s));
-    write_reg(sensor->slv_addr, 0x07, H8(col_s));
-    write_reg(sensor->slv_addr, 0x08, L8(col_s));
-    write_reg(sensor->slv_addr, 0x09, H8(win_h + 8));
-    write_reg(sensor->slv_addr, 0x0a, L8(win_h + 8));
-    write_reg(sensor->slv_addr, 0x0b, H8(win_w + 8));
-    write_reg(sensor->slv_addr, 0x0c, L8(win_w + 8));
+    sensor_write_reg(sensor->slv_addr, 0x05, H8(row_s));
+    sensor_write_reg(sensor->slv_addr, 0x06, L8(row_s));
+    sensor_write_reg(sensor->slv_addr, 0x07, H8(col_s));
+    sensor_write_reg(sensor->slv_addr, 0x08, L8(col_s));
+    sensor_write_reg(sensor->slv_addr, 0x09, H8(win_h + 8));
+    sensor_write_reg(sensor->slv_addr, 0x0a, L8(win_h + 8));
+    sensor_write_reg(sensor->slv_addr, 0x0b, H8(win_w + 8));
+    sensor_write_reg(sensor->slv_addr, 0x0c, L8(win_w + 8));
 
-    write_reg(sensor->slv_addr, 0xfe, 0x01);
-    set_reg_bits(sensor->slv_addr, 0x53, 7, 0x01, 1);
-    set_reg_bits(sensor->slv_addr, 0x55, 0, 0x01, 1);
-    write_reg(sensor->slv_addr, 0x54, cfg->reg0x54);
-    write_reg(sensor->slv_addr, 0x56, cfg->reg0x56);
-    write_reg(sensor->slv_addr, 0x57, cfg->reg0x57);
-    write_reg(sensor->slv_addr, 0x58, cfg->reg0x58);
-    write_reg(sensor->slv_addr, 0x59, cfg->reg0x59);
+    sensor_write_reg(sensor->slv_addr, 0xfe, 0x01);
+    sensor_set_reg_bits(sensor->slv_addr, 0x53, 7, 0x01, 1);
+    sensor_set_reg_bits(sensor->slv_addr, 0x55, 0, 0x01, 1);
+    sensor_write_reg(sensor->slv_addr, 0x54, cfg->reg0x54);
+    sensor_write_reg(sensor->slv_addr, 0x56, cfg->reg0x56);
+    sensor_write_reg(sensor->slv_addr, 0x57, cfg->reg0x57);
+    sensor_write_reg(sensor->slv_addr, 0x58, cfg->reg0x58);
+    sensor_write_reg(sensor->slv_addr, 0x59, cfg->reg0x59);
 
-    write_reg(sensor->slv_addr, 0xfe, 0x00);
+    sensor_write_reg(sensor->slv_addr, 0xfe, 0x00);
 
 #elif CONFIG_GC_SENSOR_WINDOWING_MODE
-    write_reg(sensor->slv_addr, 0xfe, 0x00);
+    sensor_write_reg(sensor->slv_addr, 0xfe, 0x00);
 
-    write_reg(sensor->slv_addr, 0xf7, col_s / 4);
-    write_reg(sensor->slv_addr, 0xf8, row_s / 4);
-    write_reg(sensor->slv_addr, 0xf9, (col_s + w) / 4);
-    write_reg(sensor->slv_addr, 0xfa, (row_s + h) / 4);
+    sensor_write_reg(sensor->slv_addr, 0xf7, col_s / 4);
+    sensor_write_reg(sensor->slv_addr, 0xf8, row_s / 4);
+    sensor_write_reg(sensor->slv_addr, 0xf9, (col_s + w) / 4);
+    sensor_write_reg(sensor->slv_addr, 0xfa, (row_s + h) / 4);
 
-    write_reg(sensor->slv_addr, 0x05, H8(row_s));
-    write_reg(sensor->slv_addr, 0x06, L8(row_s));
-    write_reg(sensor->slv_addr, 0x07, H8(col_s));
-    write_reg(sensor->slv_addr, 0x08, L8(col_s));
+    sensor_write_reg(sensor->slv_addr, 0x05, H8(row_s));
+    sensor_write_reg(sensor->slv_addr, 0x06, L8(row_s));
+    sensor_write_reg(sensor->slv_addr, 0x07, H8(col_s));
+    sensor_write_reg(sensor->slv_addr, 0x08, L8(col_s));
 
-    write_reg(sensor->slv_addr, 0x09, H8(h + 8));
-    write_reg(sensor->slv_addr, 0x0a, L8(h + 8));
-    write_reg(sensor->slv_addr, 0x0b, H8(w + 8));
-    write_reg(sensor->slv_addr, 0x0c, L8(w + 8));
+    sensor_write_reg(sensor->slv_addr, 0x09, H8(h + 8));
+    sensor_write_reg(sensor->slv_addr, 0x0a, L8(h + 8));
+    sensor_write_reg(sensor->slv_addr, 0x0b, H8(w + 8));
+    sensor_write_reg(sensor->slv_addr, 0x0c, L8(w + 8));
 
 #endif
     if (ret == 0) {
@@ -288,8 +243,8 @@ static int set_contrast(sensor_t *sensor, int contrast)
 {
     if (contrast > 0) {
         sensor->status.contrast = contrast;
-        write_reg(sensor->slv_addr, 0xfe, 0x00);
-        write_reg(sensor->slv_addr, 0xb3, contrast);
+        sensor_write_reg(sensor->slv_addr, 0xfe, 0x00);
+        sensor_write_reg(sensor->slv_addr, 0xb3, contrast);
     }
     return 0;
 }
@@ -297,41 +252,27 @@ static int set_contrast(sensor_t *sensor, int contrast)
 static int set_global_gain(sensor_t *sensor, int gain_level)
 {
     if (gain_level != 0) {
-        write_reg(sensor->slv_addr, 0xfe, 0x00);
-        write_reg(sensor->slv_addr, 0x50, gain_level);
+        sensor_write_reg(sensor->slv_addr, 0xfe, 0x00);
+        sensor_write_reg(sensor->slv_addr, 0x50, gain_level);
     }
     return 0;
 }
 
 static int set_hmirror(sensor_t *sensor, int enable)
 {
-    int ret = 0;
-    sensor->status.hmirror = enable;
-    ret = write_reg(sensor->slv_addr, 0xfe, 0x00);
-    ret |= set_reg_bits(sensor->slv_addr, 0x14, 0, 0x01, enable != 0);
-    if (ret == 0) {
-        ESP_LOGD(TAG, "Set h-mirror to: %d", enable);
-    }
-    return ret;
+    return gc_set_hmirror(sensor, enable, &gc0308_mirror_config);
 }
 
 static int set_vflip(sensor_t *sensor, int enable)
 {
-    int ret = 0;
-    sensor->status.vflip = enable;
-    ret = write_reg(sensor->slv_addr, 0xfe, 0x00);
-    ret |= set_reg_bits(sensor->slv_addr, 0x14, 1, 0x01, enable != 0);
-    if (ret == 0) {
-        ESP_LOGD(TAG, "Set v-flip to: %d", enable);
-    }
-    return ret;
+    return gc_set_vflip(sensor, enable, &gc0308_mirror_config);
 }
 
 static int set_colorbar(sensor_t *sensor, int enable)
 {
     int ret = 0;
-    ret = write_reg(sensor->slv_addr, 0xfe, 0x00);
-    ret |= set_reg_bits(sensor->slv_addr, 0x2e, 0, 0x01, enable);
+    ret = sensor_write_reg(sensor->slv_addr, 0xfe, 0x00);
+    ret |= sensor_set_reg_bits(sensor->slv_addr, 0x2e, 0, 0x01, enable);
     if (ret == 0) {
         sensor->status.colorbar = enable;
         ESP_LOGD(TAG, "Set colorbar to: %d", enable);
@@ -345,7 +286,7 @@ static int get_reg(sensor_t *sensor, int reg, int mask)
     if (mask > 0xFF) {
         ESP_LOGE(TAG, "mask should not more than 0xff");
     } else {
-        ret = read_reg(sensor->slv_addr, reg);
+        ret = sensor_read_reg(sensor->slv_addr, reg);
     }
     if (ret > 0) {
         ret &= mask;
@@ -359,7 +300,7 @@ static int set_reg(sensor_t *sensor, int reg, int mask, int value)
     if (mask > 0xFF) {
         ESP_LOGE(TAG, "mask should not more than 0xff");
     } else {
-        ret = read_reg(sensor->slv_addr, reg);
+        ret = sensor_read_reg(sensor->slv_addr, reg);
     }
     if (ret < 0) {
         return ret;
@@ -369,14 +310,14 @@ static int set_reg(sensor_t *sensor, int reg, int mask, int value)
     if (mask > 0xFF) {
 
     } else {
-        ret = write_reg(sensor->slv_addr, reg, value);
+        ret = sensor_write_reg(sensor->slv_addr, reg, value);
     }
     return ret;
 }
 
 static int init_status(sensor_t *sensor)
 {
-    write_reg(sensor->slv_addr, 0xfe, 0x00);
+    sensor_write_reg(sensor->slv_addr, 0xfe, 0x00);
     sensor->status.brightness = 0;
     sensor->status.contrast = 50;
     sensor->status.saturation = 0;
@@ -388,8 +329,8 @@ static int init_status(sensor_t *sensor)
     sensor->status.dcw = 0;
     sensor->status.agc = 0;
     sensor->status.aec = 0;
-    sensor->status.hmirror = check_reg_mask(sensor->slv_addr, 0x14, 0x01);
-    sensor->status.vflip = check_reg_mask(sensor->slv_addr, 0x14, 0x02);
+    sensor->status.hmirror = sensor_check_reg_mask(sensor->slv_addr, 0x14, 0x01);
+    sensor->status.vflip = sensor_check_reg_mask(sensor->slv_addr, 0x14, 0x02);
     sensor->status.colorbar = 0;
     sensor->status.bpc = 0;
     sensor->status.wpc = 0;
